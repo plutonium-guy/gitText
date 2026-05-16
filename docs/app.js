@@ -92,10 +92,39 @@ const fromWasm = packed => {
 
 const resetHeap = () => wasm.reset_heap();
 
+// Native streaming compression — brotli preferred, deflate-raw fallback
+const HAS_BR = (() => { try { new CompressionStream('br'); return true; } catch { return false; } })();
+const CS_ALGO = HAS_BR ? 'br' : 'deflate-raw';
+const TAG_BR = 0x42, TAG_DF = 0x44;
+const TAG_OUT = HAS_BR ? TAG_BR : TAG_DF;
+
+const compressBytes = async bytes => {
+    if (!bytes || !bytes.length) return null;
+    const cs = new CompressionStream(CS_ALGO);
+    const buf = await new Response(new Blob([bytes]).stream().pipeThrough(cs)).arrayBuffer();
+    const u8 = new Uint8Array(buf);
+    const out = new Uint8Array(u8.length + 1);
+    out[0] = TAG_OUT;
+    out.set(u8, 1);
+    return out;
+};
+
+const decompressBytes = async bytes => {
+    if (!bytes || bytes.length < 2) return null;
+    const algo = bytes[0] === TAG_BR ? 'br' : bytes[0] === TAG_DF ? 'deflate-raw' : null;
+    if (!algo) return null;
+    try {
+        const ds = new DecompressionStream(algo);
+        const body = bytes.subarray(1);
+        const buf = await new Response(new Blob([body]).stream().pipeThrough(ds)).arrayBuffer();
+        return new Uint8Array(buf);
+    } catch { return null; }
+};
+
 // WASM Operations
 const wasmOps = {
-    compress: data => { resetHeap(); return fromWasm(wasm.compress(...Object.values(toWasm(data))))?.slice(); },
-    decompress: data => { resetHeap(); return fromWasm(wasm.decompress(...Object.values(toWasm(data))))?.slice(); },
+    compress: compressBytes,
+    decompress: decompressBytes,
     b64enc: data => { resetHeap(); const r = fromWasm(wasm.base64url_encode(...Object.values(toWasm(data)))); return r ? DECODER.decode(r) : ''; },
     b64dec: str => { resetHeap(); return fromWasm(wasm.base64url_decode(...Object.values(toWasm(ENCODER.encode(str)))))?.slice(); },
     encrypt: (data, pw) => {
@@ -133,11 +162,21 @@ const wasmOps = {
         return toks;
     },
     qrGen: url => {
-        resetHeap();
-        const r = wasm.generate_qr(...Object.values(toWasm(ENCODER.encode(url))));
-        const ptr = Number(r >> 32n);
-        const sz = Number((r >> 16n) & 0xFFFFn);
-        return ptr ? { data: memView.subarray(ptr, ptr + sz * sz), sz } : null;
+        if (!window.qrcode) return null;
+        try {
+            // qrcode-generator: typeNumber 0 = auto, errorCorrectionLevel L
+            const qr = window.qrcode(0, 'L');
+            qr.addData(url);
+            qr.make();
+            const sz = qr.getModuleCount();
+            const data = new Uint8Array(sz * sz);
+            for (let y = 0; y < sz; y++) {
+                for (let x = 0; x < sz; x++) {
+                    data[y * sz + x] = qr.isDark(y, x) ? 1 : 0;
+                }
+            }
+            return { data, sz };
+        } catch { return null; }
     },
     hash: data => {
         resetHeap();
@@ -169,7 +208,7 @@ const idb = {
         try {
             let data = ENCODER.encode(text);
             if (pw) data = wasmOps.encrypt(data, pw);
-            const compressed = wasmOps.compress(data);
+            const compressed = await wasmOps.compress(data);
             if (!compressed) return res(null);
             const id = wasmOps.hash(compressed);
             if (!id) return res(null);
@@ -191,17 +230,19 @@ const idb = {
         if (!db) return res(null);
         const tx = db.transaction(DB_CONFIG.store, 'readonly');
         const r = tx.objectStore(DB_CONFIG.store).get(id);
-        r.onsuccess = () => {
-            const doc = r.result;
-            if (!doc) return res(null);
-            let data = wasmOps.decompress(doc.data);
-            if (!data) return res(null);
-            if (doc.enc) {
-                if (!pw) return res({ needPw: true, doc });
-                data = wasmOps.decrypt(data, pw);
-                if (!data) return res({ badPw: true });
-            }
-            res({ text: DECODER.decode(data), doc });
+        r.onsuccess = async () => {
+            try {
+                const doc = r.result;
+                if (!doc) return res(null);
+                let data = await wasmOps.decompress(doc.data);
+                if (!data) return res(null);
+                if (doc.enc) {
+                    if (!pw) return res({ needPw: true, doc });
+                    data = wasmOps.decrypt(data, pw);
+                    if (!data) return res({ badPw: true });
+                }
+                res({ text: DECODER.decode(data), doc });
+            } catch (e) { rej(e); }
         };
         r.onerror = () => rej(r.error);
     }),
@@ -229,18 +270,20 @@ const idb = {
 };
 
 // URL Encoding
-const urlEnc = (text, pw) => {
+const urlEnc = async (text, pw) => {
     let data = ENCODER.encode(text);
     if (pw) data = wasmOps.encrypt(data, pw);
-    return (pw ? 'e' : '') + wasmOps.b64enc(wasmOps.compress(data));
+    const c = await wasmOps.compress(data);
+    if (!c) return '';
+    return (pw ? 'e' : '') + wasmOps.b64enc(c);
 };
 
-const urlDec = (str, pw) => {
+const urlDec = async (str, pw) => {
     const isEnc = str[0] === 'e';
     if (isEnc) str = str.slice(1);
     const raw = wasmOps.b64dec(str);
     if (!raw) return null;
-    let data = wasmOps.decompress(raw);
+    let data = await wasmOps.decompress(raw);
     if (!data) return null;
     if (isEnc) {
         if (!pw) return { needPw: true };
@@ -260,7 +303,7 @@ const session = {
         try {
             let data = ENCODER.encode(text);
             if (pw) data = wasmOps.encrypt(data, pw);
-            const compressed = wasmOps.compress(data);
+            const compressed = await wasmOps.compress(data);
             if (!compressed) return ui.toast('Compression failed');
             const payload = {
                 k: key,
@@ -287,7 +330,7 @@ const session = {
             if (error || !data) return ui.toast('Session not found');
             const raw = wasmOps.b64dec(data.d);
             if (!raw) return ui.toast('Decode failed');
-            let decrypted = wasmOps.decompress(raw);
+            let decrypted = await wasmOps.decompress(raw);
             if (!decrypted) return ui.toast('Decompress failed');
             if (data.e) {
                 if (!pw) return ui.showSessionPw(key);
@@ -313,9 +356,11 @@ const session = {
         try {
             let data = ENCODER.encode(text);
             if (password) data = wasmOps.encrypt(data, password);
+            const c = await wasmOps.compress(data);
+            if (!c) return;
             await supabase.from('sessions').upsert({
                 k: sessionKey,
-                d: wasmOps.b64enc(wasmOps.compress(data)),
+                d: wasmOps.b64enc(c),
                 e: !!password,
                 u: new Date().toISOString()
             });
@@ -329,7 +374,7 @@ const session = {
             if (!data) return;
             const raw = wasmOps.b64dec(data.d);
             if (!raw) return;
-            let decrypted = wasmOps.decompress(raw);
+            let decrypted = await wasmOps.decompress(raw);
             if (!decrypted) return;
             if (data.e) {
                 if (!password) return; // Can't decrypt without password
@@ -468,7 +513,7 @@ const ui = {
                         ui.closeModal();
                     }
                 } else {
-                    const t = urlDec(location.hash.slice(1), pw);
+                    const t = await urlDec(location.hash.slice(1), pw);
                     if (t?.badPw) return ui.toast('Wrong password');
                     if (typeof t === 'string') {
                         password = pw;
@@ -575,18 +620,18 @@ const ui = {
         dom.docs_list.innerHTML = `
             <div class="download-options">
                 <button class="download-option" data-f="txt"><span class="download-icon">[TXT]</span><span>.${ui.getExt()}</span></button>
-                <button class="download-option" data-f="lzss"><span class="download-icon">[LZSS]</span><span>.lzss</span></button>
+                <button class="download-option" data-f="gtz"><span class="download-icon">[GTZ]</span><span>.gtz</span></button>
             </div>`;
-        dom.docs_list.querySelectorAll('.download-option').forEach(b => b.onclick = () => {
+        dom.docs_list.querySelectorAll('.download-option').forEach(b => b.onclick = async () => {
             const text = dom.editor.value;
             if (!text) return ui.toast('Empty');
             const a = document.createElement('a');
             const ts = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-            if (b.dataset.f === 'lzss') {
-                const c = wasmOps.compress(ENCODER.encode(text));
+            if (b.dataset.f === 'gtz') {
+                const c = await wasmOps.compress(ENCODER.encode(text));
                 if (!c) return ui.toast('Failed');
                 a.href = URL.createObjectURL(new Blob([c]));
-                a.download = `gt_${ts}.lzss`;
+                a.download = `gt_${ts}.gtz`;
             } else {
                 a.href = URL.createObjectURL(new Blob([text]));
                 a.download = `gt_${ts}.${ui.getExt()}`;
@@ -600,9 +645,9 @@ const ui = {
     },
     showQR: () => {
         const url = location.href;
-        if (url.length > 2000) return ui.toast('URL too long');
+        if (url.length > 2900) return ui.toast('URL too long for QR — use SESSION');
         const q = wasmOps.qrGen(url);
-        if (!q) return ui.toast('Failed');
+        if (!q) return ui.toast('QR failed');
         dom.qr_canvas.style.display = 'block';
         dom.qr_canvas.width = dom.qr_canvas.height = (q.sz + 8) * 6;
         const ctx = dom.qr_canvas.getContext('2d');
@@ -635,7 +680,7 @@ const doc = {
         }
         ui.setStatus('saving');
         try {
-            const encoded = urlEnc(text, password);
+            const encoded = await urlEnc(text, password);
             if (encoded.length < URL_LIMIT) {
                 storageMode = 'url';
                 docId = null;
@@ -675,7 +720,7 @@ const doc = {
         storageMode = 'url';
         if (hash[0] === 'e') return ui.showPassword('decrypt');
         try {
-            const t = urlDec(hash);
+            const t = await urlDec(hash);
             if (typeof t === 'string' && t) {
                 dom.editor.value = t;
                 dom.url_size.textContent = ui.fmtBytes(hash.length);
