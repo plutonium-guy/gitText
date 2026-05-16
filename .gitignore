@@ -1,4 +1,2 @@
-.zig-cache/
-.zig-out/
-.cache/
-.zig-ast/
+target/
+Cargo.lock

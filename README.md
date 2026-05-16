@@ -12,20 +12,20 @@ A text editor where the entire document state is compressed and stored in the UR
 
 ## Build
 
-Requires [Zig](https://ziglang.org/) (0.15.0 or later).
+Requires [Rust](https://rustup.rs/) (stable) with the `wasm32-unknown-unknown` target:
 
 ```bash
-zig build
+rustup target add wasm32-unknown-unknown
+cargo build --release
+cp target/wasm32-unknown-unknown/release/editor.wasm docs/editor.wasm
 ```
-
-This compiles the WASM module and places it in the `web/` directory.
 
 ## Run
 
-Serve the `web/` directory with any static file server:
+Serve the `docs/` directory with any static file server:
 
 ```bash
-cd web
+cd docs
 python3 -m http.server 8000
 ```
 
@@ -69,12 +69,13 @@ https://example.com/editor/#eJzLSM3JyQcABiwCFQ
 ```
 gitText/
 ├── src/
-│   └── main.zig          # WASM module: compression, encoding
-├── web/
+│   └── lib.rs            # WASM module: compression, encoding, AES, QR, sessions, lexer
+├── docs/
 │   ├── index.html        # Editor UI
 │   ├── app.js            # WASM loader, editor logic
 │   └── editor.wasm       # Compiled WASM (after build)
-├── build.zig             # Zig build configuration
+├── Cargo.toml            # Rust crate manifest
+├── .cargo/config.toml    # Default target + linker flags
 └── README.md
 ```
 
