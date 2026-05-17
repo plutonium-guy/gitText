@@ -30,6 +30,28 @@
             --mono: 'IBM Plex Mono', 'Berkeley Mono', 'Menlo', monospace;
         }
 
+        html[data-theme="paper"] {
+            --ink:        #f3eee2;
+            --ink-2:      #ebe6d8;
+            --surface:    #e8e3d4;
+            --surface-2:  #ddd6c2;
+            --rule:       #b9b0a0;
+            --rule-soft:  #d4cdb9;
+            --text:       #1a1d1f;
+            --text-dim:   #6c7178;
+            --text-soft:  #46494d;
+            --text-bright:#0a0a0a;
+            --phosphor:   #c83a30;
+            --phosphor-d: #a82820;
+            --amber:      #b88800;
+            --blood:      #c83a30;
+            --ion:        #1f6bb0;
+            --plum:       #7838b8;
+        }
+
+        html[data-wrap="1"] #highlight-layer,
+        html[data-wrap="1"] #editor { white-space: pre-wrap; }
+
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
         html, body {
@@ -701,6 +723,77 @@
         }
         .error { color: var(--blood); }
 
+        /* =================== TABS =================== */
+        #tab-strip {
+            display: none;
+            align-items: stretch;
+            gap: 1px;
+            background: var(--surface);
+            border-bottom: 1px solid var(--rule);
+            overflow-x: auto;
+            padding: 0 0.5rem;
+        }
+        .tab {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.45rem 0.75rem;
+            background: var(--ink-2);
+            border: 1px solid var(--rule);
+            border-bottom: none;
+            font-size: 0.72rem;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            color: var(--text-dim);
+            cursor: pointer;
+            margin-top: 0.3rem;
+        }
+        .tab.active { background: var(--ink); color: var(--text-bright); border-color: var(--phosphor); }
+        .tab-close { color: var(--text-dim); }
+        .tab-close:hover { color: var(--blood); }
+        .tab-add {
+            border: 1px dashed var(--rule);
+            background: transparent;
+            color: var(--text-dim);
+            margin-top: 0.3rem;
+            padding: 0.45rem 0.75rem;
+            font-size: 0.7rem;
+        }
+        .tab-add::before, .tab-add::after { display: none; }
+
+        /* =================== SEARCH BAR =================== */
+        #search-bar {
+            display: none;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 0.85rem;
+            background: var(--surface-2);
+            border-bottom: 1px solid var(--rule);
+            font-size: 0.72rem;
+        }
+        #search-bar.show { display: flex; }
+        #search-bar input[type="text"], #search-bar input:not([type]) {
+            background: var(--ink);
+            border: 1px solid var(--rule);
+            color: var(--text-bright);
+            font-family: var(--mono);
+            font-size: 0.78rem;
+            padding: 0.35rem 0.5rem;
+            outline: none;
+        }
+        #search-bar #sr-q, #search-bar #sr-r { width: 180px; }
+        #search-bar label { color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.1em; font-size: 0.6rem; cursor: pointer; }
+        #search-bar button {
+            padding: 0.28rem 0.55rem;
+            font-size: 0.65rem;
+        }
+        #search-bar button::before, #search-bar button::after { display: none; }
+        #search-bar #sr-count { color: var(--text-dim); letter-spacing: 0.08em; margin-left: 0.4rem; font-size: 0.62rem; }
+        #search-bar .tok-match { background: rgba(182,255,102,0.35); color: var(--ink); }
+
+        /* highlight match overlay */
+        .tok-match { background: rgba(182,255,102,0.32); color: inherit; box-shadow: 0 0 0 1px rgba(182,255,102,0.5); }
+
         /* =================== RESPONSIVE =================== */
         @media (max-width: 720px) {
             header { padding: 0.65rem 0.85rem; gap: 0.5rem; }
@@ -735,9 +828,13 @@
             <button id="encrypt-btn" disabled>Encrypt</button>
             <button id="qr-btn" disabled>QR</button>
             <button id="copy-btn" class="accent" disabled>Copy</button>
+            <button id="palette-btn" disabled>⌘K</button>
             <button id="clear-btn" class="danger">Clear</button>
         </div>
     </header>
+
+    <div id="tab-strip"></div>
+    <div id="search-bar"></div>
 
     <main>
         <div class="loading" id="loading">
