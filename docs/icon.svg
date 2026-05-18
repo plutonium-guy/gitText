@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" fill="#07090a"/>
+  <rect x="48" y="48" width="416" height="416" fill="none" stroke="#b6ff66" stroke-width="6"/>
+  <rect x="68" y="68" width="40" height="40" fill="#b6ff66"/>
+  <rect x="404" y="404" width="40" height="40" fill="#b6ff66"/>
+  <text x="256" y="288" font-family="ui-monospace, 'IBM Plex Mono', monospace" font-size="120" font-weight="700"
+        text-anchor="middle" fill="#f2ecdd">git<tspan fill="#b6ff66">/</tspan>text</text>
+  <text x="256" y="356" font-family="ui-monospace, 'IBM Plex Mono', monospace" font-size="32" font-weight="500"
+        text-anchor="middle" letter-spacing="6" fill="#6a7178">SHARE · ENCRYPT · SIGN</text>
+</svg>

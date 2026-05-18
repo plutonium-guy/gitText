@@ -2000,3 +2000,276 @@ pub unsafe extern "C" fn render_png(
 
     return_bytes(&png)
 }
+
+// ============================================================================
+// JSONPath-lite: dot/bracket path over a JSON value.
+// Returns the matched sub-string from the source (or empty if not found).
+// Supports: $.foo.bar, $[0], $.a.b[2].c — no wildcards / filters.
+// ============================================================================
+
+fn skip_ws(b: &[u8], mut i: usize) -> usize {
+    while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+    i
+}
+
+fn json_skip_value(b: &[u8], mut i: usize) -> usize {
+    i = skip_ws(b, i);
+    if i >= b.len() { return i; }
+    match b[i] {
+        b'"' => {
+            i += 1;
+            while i < b.len() {
+                if b[i] == b'\\' && i + 1 < b.len() { i += 2; continue; }
+                if b[i] == b'"' { return i + 1; }
+                i += 1;
+            }
+            i
+        }
+        b'{' => {
+            let mut depth = 1; i += 1;
+            while i < b.len() && depth > 0 {
+                if b[i] == b'"' { i = json_skip_value(b, i); continue; }
+                if b[i] == b'{' || b[i] == b'[' { depth += 1; }
+                else if b[i] == b'}' || b[i] == b']' { depth -= 1; }
+                i += 1;
+            }
+            i
+        }
+        b'[' => {
+            let mut depth = 1; i += 1;
+            while i < b.len() && depth > 0 {
+                if b[i] == b'"' { i = json_skip_value(b, i); continue; }
+                if b[i] == b'{' || b[i] == b'[' { depth += 1; }
+                else if b[i] == b'}' || b[i] == b']' { depth -= 1; }
+                i += 1;
+            }
+            i
+        }
+        _ => {
+            while i < b.len() && !matches!(b[i], b',' | b'}' | b']' | b' ' | b'\t' | b'\n' | b'\r') { i += 1; }
+            i
+        }
+    }
+}
+
+fn json_find_key<'a>(b: &'a [u8], start: usize, key: &[u8]) -> Option<usize> {
+    // Expects b[start] == '{'
+    let mut i = start + 1;
+    loop {
+        i = skip_ws(b, i);
+        if i >= b.len() || b[i] == b'}' { return None; }
+        if b[i] != b'"' { return None; }
+        let ks = i + 1;
+        let mut j = ks;
+        while j < b.len() && b[j] != b'"' {
+            if b[j] == b'\\' && j + 1 < b.len() { j += 2; continue; }
+            j += 1;
+        }
+        let this_key = &b[ks..j];
+        i = j + 1;
+        i = skip_ws(b, i);
+        if i >= b.len() || b[i] != b':' { return None; }
+        i = skip_ws(b, i + 1);
+        if this_key == key { return Some(i); }
+        i = json_skip_value(b, i);
+        i = skip_ws(b, i);
+        if i < b.len() && b[i] == b',' { i += 1; continue; }
+        return None;
+    }
+}
+
+fn json_index(b: &[u8], start: usize, idx: usize) -> Option<usize> {
+    // Expects b[start] == '['
+    let mut i = start + 1;
+    let mut n = 0;
+    loop {
+        i = skip_ws(b, i);
+        if i >= b.len() || b[i] == b']' { return None; }
+        if n == idx { return Some(i); }
+        i = json_skip_value(b, i);
+        i = skip_ws(b, i);
+        if i < b.len() && b[i] == b',' { i += 1; n += 1; continue; }
+        return None;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn json_query(
+    src_ptr: *const u8, src_len: usize,
+    path_ptr: *const u8, path_len: usize,
+) -> u64 {
+    let src = slice::from_raw_parts(src_ptr, src_len);
+    let path = core::str::from_utf8(slice::from_raw_parts(path_ptr, path_len)).unwrap_or("");
+    let mut cur = skip_ws(src, 0);
+    let mut p = path;
+    if p.starts_with('$') { p = &p[1..]; }
+    while !p.is_empty() {
+        if p.starts_with('.') {
+            p = &p[1..];
+            let end = p.find(|c: char| c == '.' || c == '[').unwrap_or(p.len());
+            let (key, rest) = p.split_at(end);
+            if cur >= src.len() || src[cur] != b'{' { return 0; }
+            let Some(next) = json_find_key(src, cur, key.as_bytes()) else { return 0; };
+            cur = next;
+            p = rest;
+        } else if p.starts_with('[') {
+            let end = p.find(']').unwrap_or(0);
+            if end == 0 { return 0; }
+            let idx: usize = match p[1..end].parse() { Ok(n) => n, Err(_) => return 0 };
+            if cur >= src.len() || src[cur] != b'[' { return 0; }
+            let Some(next) = json_index(src, cur, idx) else { return 0; };
+            cur = next;
+            p = &p[end + 1..];
+        } else {
+            break;
+        }
+    }
+    let end = json_skip_value(src, cur);
+    return_bytes(&src[cur..end])
+}
+
+// ============================================================================
+// JWT decode (no signature verify) and JWT verify HS256/EdDSA via supplied key.
+// ============================================================================
+
+fn b64url_decode_str_internal(input: &str) -> Vec<u8> {
+    b64url_decode_bytes(input.as_bytes())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn jwt_decode(
+    token_ptr: *const u8, token_len: usize,
+) -> u64 {
+    let token = core::str::from_utf8(slice::from_raw_parts(token_ptr, token_len)).unwrap_or("");
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() < 2 { return 0; }
+    let header = b64url_decode_str_internal(parts[0]);
+    let payload = b64url_decode_str_internal(parts[1]);
+    let mut out = String::new();
+    out.push_str("HEADER:\n");
+    out.push_str(core::str::from_utf8(&header).unwrap_or(""));
+    out.push_str("\n\nPAYLOAD:\n");
+    out.push_str(core::str::from_utf8(&payload).unwrap_or(""));
+    if let Some(p) = json_pretty(core::str::from_utf8(&payload).unwrap_or(""), 2) {
+        out.push_str("\n\nPAYLOAD (pretty):\n");
+        out.push_str(&p);
+    }
+    return_bytes(out.as_bytes())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn jwt_verify_eddsa(
+    token_ptr: *const u8, token_len: usize,
+    pk_ptr: *const u8,
+) -> u32 {
+    use ed25519_compact::*;
+    let token = core::str::from_utf8(slice::from_raw_parts(token_ptr, token_len)).unwrap_or("");
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 { return 0; }
+    let signing_input = format!("{}.{}", parts[0], parts[1]);
+    let sig_bytes = b64url_decode_str_internal(parts[2]);
+    let pk_bytes = slice::from_raw_parts(pk_ptr, 32);
+    let Ok(sig) = Signature::from_slice(&sig_bytes) else { return 0; };
+    let Ok(pk) = PublicKey::from_slice(pk_bytes) else { return 0; };
+    if pk.verify(signing_input.as_bytes(), &sig).is_ok() { 1 } else { 0 }
+}
+
+// ============================================================================
+// ASCII art (small 5x7 banner from glyphs in font8x8 BASIC_FONTS, 1 char per line block)
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn ascii_art(
+    text_ptr: *const u8, text_len: usize,
+) -> u64 {
+    use font8x8::UnicodeFonts;
+    if text_len == 0 { return 0; }
+    let text = core::str::from_utf8(slice::from_raw_parts(text_ptr, text_len)).unwrap_or("");
+    let mut rows: [String; 8] = Default::default();
+    for ch in text.chars() {
+        let glyph = font8x8::BASIC_FONTS.get(ch).unwrap_or([0u8; 8]);
+        for r in 0..8 {
+            for c in 0..8 {
+                if glyph[r] & (1 << c) != 0 { rows[r].push('█'); }
+                else { rows[r].push(' '); }
+            }
+            rows[r].push(' ');
+        }
+    }
+    let mut out = String::new();
+    for r in 0..8 {
+        out.push_str(&rows[r]);
+        out.push('\n');
+    }
+    return_bytes(out.as_bytes())
+}
+
+// ============================================================================
+// SHA-256 (constant impl)
+// ============================================================================
+
+const SHA_K: [u32; 64] = [
+    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2,
+];
+
+fn sha256(data: &[u8]) -> [u8; 32] {
+    let mut h: [u32; 8] = [
+        0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,
+        0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19,
+    ];
+    let mut msg = data.to_vec();
+    let bitlen = (data.len() as u64).wrapping_mul(8);
+    msg.push(0x80);
+    while msg.len() % 64 != 56 { msg.push(0); }
+    msg.extend_from_slice(&bitlen.to_be_bytes());
+    for chunk in msg.chunks(64) {
+        let mut w = [0u32; 64];
+        for i in 0..16 {
+            w[i] = u32::from_be_bytes(chunk[i*4..i*4+4].try_into().unwrap());
+        }
+        for i in 16..64 {
+            let s0 = w[i-15].rotate_right(7) ^ w[i-15].rotate_right(18) ^ (w[i-15] >> 3);
+            let s1 = w[i-2].rotate_right(17) ^ w[i-2].rotate_right(19) ^ (w[i-2] >> 10);
+            w[i] = w[i-16].wrapping_add(s0).wrapping_add(w[i-7]).wrapping_add(s1);
+        }
+        let mut a = h[0]; let mut b = h[1]; let mut c = h[2]; let mut d = h[3];
+        let mut e = h[4]; let mut f = h[5]; let mut g = h[6]; let mut hh = h[7];
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ (!e & g);
+            let t1 = hh.wrapping_add(s1).wrapping_add(ch).wrapping_add(SHA_K[i]).wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let mj = (a & b) ^ (a & c) ^ (b & c);
+            let t2 = s0.wrapping_add(mj);
+            hh = g; g = f; f = e; e = d.wrapping_add(t1);
+            d = c; c = b; b = a; a = t1.wrapping_add(t2);
+        }
+        h[0] = h[0].wrapping_add(a); h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c); h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e); h[5] = h[5].wrapping_add(f);
+        h[6] = h[6].wrapping_add(g); h[7] = h[7].wrapping_add(hh);
+    }
+    let mut out = [0u8; 32];
+    for i in 0..8 {
+        out[i*4..i*4+4].copy_from_slice(&h[i].to_be_bytes());
+    }
+    out
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sha256_hex(data_ptr: *const u8, data_len: usize) -> u64 {
+    let data = slice::from_raw_parts(data_ptr, data_len);
+    let h = sha256(data);
+    let mut s = String::with_capacity(64);
+    for b in h.iter() {
+        s.push_str(&format!("{:02x}", b));
+    }
+    return_bytes(s.as_bytes())
+}

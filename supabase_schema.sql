@@ -74,3 +74,58 @@ SELECT cron.schedule('cleanup-sessions', '0 * * * *', 'SELECT cleanup_expired_se
 -- Index for fast lookups and cleanup
 CREATE INDEX idx_sessions_expires ON sessions(expires_at);
 CREATE INDEX idx_sessions_key ON sessions(k);
+
+-- ============================================================
+-- View counter + one-time-share extension
+-- ============================================================
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS views_remaining INT;     -- NULL = unlimited
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS view_count INT DEFAULT 0;
+
+-- RPC: decrement views_remaining (if set), delete row when it hits zero.
+-- Returns the payload exactly once for the final read.
+CREATE OR REPLACE FUNCTION view_session(session_k TEXT)
+RETURNS TABLE(d TEXT, e BOOLEAN, remaining INT) AS $$
+DECLARE
+    rec RECORD;
+BEGIN
+    SELECT s.d, s.e, s.views_remaining, s.view_count
+        INTO rec
+        FROM sessions s
+        WHERE s.k = session_k AND s.expires_at > NOW();
+
+    IF NOT FOUND THEN
+        RETURN;
+    END IF;
+
+    IF rec.views_remaining IS NOT NULL THEN
+        IF rec.views_remaining <= 1 THEN
+            -- last read: return payload then delete row
+            d := rec.d;
+            e := rec.e;
+            remaining := 0;
+            DELETE FROM sessions WHERE k = session_k;
+            RETURN NEXT;
+            RETURN;
+        ELSE
+            UPDATE sessions
+                SET views_remaining = views_remaining - 1,
+                    view_count      = view_count + 1
+                WHERE k = session_k;
+            d := rec.d;
+            e := rec.e;
+            remaining := rec.views_remaining - 1;
+            RETURN NEXT;
+            RETURN;
+        END IF;
+    ELSE
+        UPDATE sessions SET view_count = view_count + 1 WHERE k = session_k;
+        d := rec.d;
+        e := rec.e;
+        remaining := NULL;
+        RETURN NEXT;
+    END IF;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Allow anon to call view_session
+GRANT EXECUTE ON FUNCTION view_session(TEXT) TO anon, authenticated;

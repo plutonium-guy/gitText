@@ -1,0 +1,33 @@
+{
+  "name": "git/text — shareable text editor",
+  "short_name": "git/text",
+  "description": "Text editor where document state lives in the URL. Encrypted, signed, multi-file, offline.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#07090a",
+  "theme_color": "#07090a",
+  "orientation": "any",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ],
+  "share_target": {
+    "action": "./",
+    "method": "GET",
+    "enctype": "application/x-www-form-urlencoded",
+    "params": { "title": "share_title", "text": "share_text", "url": "share_url" }
+  },
+  "file_handlers": [
+    {
+      "action": "./",
+      "accept": {
+        "text/plain": [".txt", ".md", ".log"],
+        "application/json": [".json"],
+        "text/javascript": [".js", ".mjs"],
+        "text/css": [".css"],
+        "text/x-rust": [".rs"],
+        "application/octet-stream": [".gtz"]
+      }
+    }
+  ]
+}
