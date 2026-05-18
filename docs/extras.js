@@ -395,6 +395,194 @@ W.asciiArt = (text) => {
   return r ? new TextDecoder().decode(r) : '';
 };
 
+// ------- JSON structure tree view -------------------------------------------
+const typeOf = v => {
+  if (v === null) return 'null';
+  if (Array.isArray(v)) return 'array';
+  return typeof v; // string / number / boolean / object
+};
+const TYPE_COLORS = {
+  string:  '#ffc890',
+  number:  '#c1ff7a',
+  boolean: '#d49bff',
+  null:    '#6a7178',
+  object:  '#66e0ff',
+  array:   '#ffb648'
+};
+const renderJsonNode = (v, key, path, isLast = true) => {
+  const t = typeOf(v);
+  const color = TYPE_COLORS[t];
+  const keyHtml = key !== null ? `<span class="jt-key" data-path="${escape(path)}">${escape(String(key))}</span>` : '';
+  if (t === 'object' || t === 'array') {
+    const entries = t === 'array'
+      ? v.map((x, i) => [i, x])
+      : Object.entries(v);
+    const summary =
+      `${keyHtml}` +
+      `<span class="jt-bracket">${t === 'array' ? '[' : '{'}</span>` +
+      `<span class="jt-meta" style="color:${color}"> ${entries.length} ${t === 'array' ? 'items' : 'keys'} </span>` +
+      `<span class="jt-bracket">${t === 'array' ? ']' : '}'}</span>`;
+    if (entries.length === 0) return `<div class="jt-leaf">${summary}</div>`;
+    const children = entries.map(([k, val], i) => {
+      const childPath = t === 'array' ? `${path}[${k}]` : (path ? `${path}.${k}` : `$.${k}`);
+      return renderJsonNode(val, k, childPath, i === entries.length - 1);
+    }).join('');
+    return `<details class="jt-node" open data-path="${escape(path)}"><summary>${summary}</summary><div class="jt-children">${children}</div></details>`;
+  }
+  // leaf
+  let val;
+  let extra = '';
+  if (t === 'string') {
+    val = `<span class="jt-str">"${escape(v)}"</span>`;
+    extra = `<span class="jt-meta">len ${[...v].length}</span>`;
+  } else if (t === 'number') {
+    val = `<span class="jt-num">${v}</span>`;
+    if (Number.isInteger(v)) extra = '<span class="jt-meta">int</span>';
+    else extra = '<span class="jt-meta">float</span>';
+  } else if (t === 'boolean') {
+    val = `<span class="jt-bool">${v}</span>`;
+  } else if (t === 'null') {
+    val = `<span class="jt-null">null</span>`;
+  }
+  return `<div class="jt-leaf" data-path="${escape(path)}">` +
+    `${keyHtml}<span class="jt-val">${val}</span>` +
+    `<span class="jt-type" style="color:${color}">${t}</span>${extra}</div>`;
+};
+
+const aggregateSchema = (v, schema = { _types: new Set() }) => {
+  const t = typeOf(v);
+  schema._types.add(t);
+  if (t === 'object') {
+    schema._keys = schema._keys || {};
+    for (const [k, val] of Object.entries(v)) {
+      schema._keys[k] = schema._keys[k] || { _types: new Set(), _count: 0 };
+      schema._keys[k]._count += 1;
+      aggregateSchema(val, schema._keys[k]);
+    }
+  } else if (t === 'array') {
+    schema._items = schema._items || { _types: new Set() };
+    for (const x of v) aggregateSchema(x, schema._items);
+  }
+  return schema;
+};
+const renderSchema = (s, key = '$', depth = 0) => {
+  if (!s) return '';
+  const types = [...s._types].sort();
+  const tStr = types.map(t => `<span style="color:${TYPE_COLORS[t]}">${t}</span>`).join(' | ');
+  const indent = '  '.repeat(depth);
+  let out = `${indent}<span class="jt-key">${escape(key)}</span> : ${tStr}`;
+  if (s._count !== undefined && s._count > 1) out += ` <span class="jt-meta">×${s._count}</span>`;
+  out += '\n';
+  if (s._keys) {
+    for (const [k, sub] of Object.entries(s._keys)) {
+      out += renderSchema(sub, k, depth + 1);
+    }
+  }
+  if (s._items) {
+    out += renderSchema(s._items, '[*]', depth + 1);
+  }
+  return out;
+};
+
+ui.showJsonTree = () => {
+  dom.modal_title.textContent = 'json structure';
+  dom.password_form.style.display = 'none';
+  dom.docs_list.style.display = 'block';
+  dom.modal.classList.add('show');
+  const txt = (typeof getText === 'function' ? getText() : dom.editor.value).trim();
+  let val;
+  try { val = JSON.parse(txt); }
+  catch (e) {
+    dom.docs_list.innerHTML = `
+      <div class="error" style="text-align:left;padding:1rem">
+        <div style="margin-bottom:0.5rem">parse error</div>
+        <pre style="margin:0;color:var(--blood);font-size:0.7rem;white-space:pre-wrap">${escape(e.message)}</pre>
+      </div>`;
+    return;
+  }
+  const t = typeOf(val);
+  const sz = Array.isArray(val) ? val.length
+    : (val && typeof val === 'object') ? Object.keys(val).length
+    : null;
+  dom.docs_list.innerHTML = `
+    <style>
+      .jt-toolbar { display:flex; gap:0.3rem; margin-bottom:0.6rem; }
+      .jt-toolbar button { padding:0.3rem 0.5rem; font-size:0.6rem; }
+      .jt-tree { font-family: var(--mono); font-size: 0.74rem; line-height: 1.45;
+                 background: var(--ink); border: 1px solid var(--rule); padding: 0.6rem;
+                 max-height: 360px; overflow: auto; color: var(--text); }
+      .jt-tree details { padding-left: 0.4rem; border-left: 1px dashed var(--rule-soft); margin-left: 0.1rem; }
+      .jt-tree summary { cursor: pointer; list-style: none; padding: 0.05rem 0; }
+      .jt-tree summary::-webkit-details-marker { display: none; }
+      .jt-tree summary::before { content: '▾'; display: inline-block; width: 0.8rem; color: var(--text-dim); }
+      .jt-tree details:not([open]) > summary::before { content: '▸'; }
+      .jt-tree .jt-children { padding-left: 0.6rem; }
+      .jt-tree .jt-leaf { padding: 0.05rem 0 0.05rem 0.8rem; display:flex; gap:0.4rem; align-items:center; }
+      .jt-tree .jt-key { color: #b2f2ff; cursor: pointer; }
+      .jt-tree .jt-key:hover { text-decoration: underline; }
+      .jt-tree .jt-bracket { color: var(--text-dim); margin: 0 0.15rem; }
+      .jt-tree .jt-val { flex: 1; min-width: 0; }
+      .jt-tree .jt-str { color: #ffc890; }
+      .jt-tree .jt-num { color: #c1ff7a; }
+      .jt-tree .jt-bool { color: #d49bff; }
+      .jt-tree .jt-null { color: var(--text-dim); }
+      .jt-tree .jt-type { font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.1em;
+                          padding: 0.05rem 0.35rem; border: 1px solid currentColor; opacity: 0.85; }
+      .jt-tree .jt-meta { font-size: 0.62rem; color: var(--text-dim); letter-spacing: 0.05em; }
+      .jt-schema { font-family: var(--mono); font-size: 0.72rem; white-space: pre;
+                   background: var(--ink); border: 1px solid var(--rule); padding: 0.6rem;
+                   max-height: 360px; overflow: auto; color: var(--text); display: none; }
+    </style>
+    <div class="jt-toolbar">
+      <button id="jt-tab-tree" class="active">tree</button>
+      <button id="jt-tab-schema">schema</button>
+      <span style="flex:1"></span>
+      <button id="jt-expand">expand</button>
+      <button id="jt-collapse">collapse</button>
+      <button id="jt-copy">copy pretty</button>
+    </div>
+    <div class="jt-tree" id="jt-tree-view">${renderJsonNode(val, null, '$')}</div>
+    <div class="jt-schema" id="jt-schema-view"></div>
+    <div style="margin-top:0.4rem;font-size:0.62rem;color:var(--text-dim);letter-spacing:0.08em">
+      root: <span style="color:${TYPE_COLORS[t]}">${t}</span>${sz !== null ? ` · ${sz} ${t === 'array' ? 'items' : 'keys'}` : ''} · click any key to copy its JSONPath
+    </div>`;
+  // schema view renders raw HTML; re-render properly:
+  const schemaHtml = renderSchema(aggregateSchema(val));
+  // schema string contains <span> already; place as innerHTML pre-style
+  const schemaEl = document.getElementById('jt-schema-view');
+  schemaEl.innerHTML = schemaHtml;
+
+  const treeEl = document.getElementById('jt-tree-view');
+  treeEl.addEventListener('click', e => {
+    const k = e.target.closest('.jt-key');
+    if (!k) return;
+    const path = k.dataset.path || k.closest('[data-path]')?.dataset.path;
+    if (path) {
+      navigator.clipboard.writeText(path).catch(() => {});
+      ui.toast('path copied: ' + path);
+    }
+  });
+
+  document.getElementById('jt-tab-tree').onclick = () => {
+    treeEl.style.display = '';
+    schemaEl.style.display = 'none';
+    document.getElementById('jt-tab-tree').classList.add('active');
+    document.getElementById('jt-tab-schema').classList.remove('active');
+  };
+  document.getElementById('jt-tab-schema').onclick = () => {
+    treeEl.style.display = 'none';
+    schemaEl.style.display = 'block';
+    document.getElementById('jt-tab-schema').classList.add('active');
+    document.getElementById('jt-tab-tree').classList.remove('active');
+  };
+  document.getElementById('jt-expand').onclick = () => treeEl.querySelectorAll('details').forEach(d => d.open = true);
+  document.getElementById('jt-collapse').onclick = () => treeEl.querySelectorAll('details').forEach(d => d.open = false);
+  document.getElementById('jt-copy').onclick = () => {
+    try { navigator.clipboard.writeText(JSON.stringify(val, null, 2)); ui.toast('pretty copied'); }
+    catch { ui.toast('copy failed'); }
+  };
+};
+
 // ------- hex viewer toggle --------------------------------------------------
 let hexMode = false;
 ui.toggleHexView = () => {
@@ -576,6 +764,7 @@ ui.showPalette = function() {
     { l: 'toggle markdown preview',            r: () => ui.togglePreview() },
     { l: 'toggle hex view',                    r: () => ui.toggleHexView() },
     { l: 'toggle CSV align view',              r: () => ui.toggleCSVView() },
+    { l: 'json structure / schema view',       r: () => ui.showJsonTree() },
     { l: 'toggle trim trailing whitespace on save', r: () => { prefs.trim = !prefs.trim; savePrefs(); ui.toast('trim ' + (prefs.trim ? 'on' : 'off')); } },
     // formatters
     { l: 'format json',                        r: () => actions.formatJSON() },
