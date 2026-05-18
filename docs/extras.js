@@ -484,18 +484,25 @@ const renderSchema = (s, key = '$', depth = 0) => {
   return out;
 };
 
-ui.showJsonTree = () => {
-  dom.modal_title.textContent = 'json structure';
+ui.showStructTree = (format = 'json') => {
+  dom.modal_title.textContent = format + ' structure';
   dom.password_form.style.display = 'none';
   dom.docs_list.style.display = 'block';
   dom.modal.classList.add('show');
   const txt = (typeof getText === 'function' ? getText() : dom.editor.value).trim();
   let val;
-  try { val = JSON.parse(txt); }
-  catch (e) {
+  try {
+    if (format === 'yaml') {
+      if (!window.jsyaml) throw new Error('js-yaml not loaded yet — retry in a moment');
+      const docs = window.jsyaml.loadAll(txt);
+      val = docs.length === 1 ? docs[0] : docs;
+    } else {
+      val = JSON.parse(txt);
+    }
+  } catch (e) {
     dom.docs_list.innerHTML = `
       <div class="error" style="text-align:left;padding:1rem">
-        <div style="margin-bottom:0.5rem">parse error</div>
+        <div style="margin-bottom:0.5rem">${format} parse error</div>
         <pre style="margin:0;color:var(--blood);font-size:0.7rem;white-space:pre-wrap">${escape(e.message)}</pre>
       </div>`;
     return;
@@ -578,9 +585,44 @@ ui.showJsonTree = () => {
   document.getElementById('jt-expand').onclick = () => treeEl.querySelectorAll('details').forEach(d => d.open = true);
   document.getElementById('jt-collapse').onclick = () => treeEl.querySelectorAll('details').forEach(d => d.open = false);
   document.getElementById('jt-copy').onclick = () => {
-    try { navigator.clipboard.writeText(JSON.stringify(val, null, 2)); ui.toast('pretty copied'); }
-    catch { ui.toast('copy failed'); }
+    try {
+      const out = format === 'yaml' && window.jsyaml
+        ? window.jsyaml.dump(val, { indent: 2, lineWidth: 100, noRefs: true })
+        : JSON.stringify(val, null, 2);
+      navigator.clipboard.writeText(out);
+      ui.toast('pretty copied');
+    } catch { ui.toast('copy failed'); }
   };
+};
+
+// Back-compat aliases
+ui.showJsonTree = () => ui.showStructTree('json');
+ui.showYamlTree = () => ui.showStructTree('yaml');
+
+// Conversions
+ui.yamlToJson = () => {
+  if (!window.jsyaml) return ui.toast('js-yaml not loaded');
+  try {
+    const txt = (typeof getText === 'function' ? getText() : dom.editor.value);
+    const docs = window.jsyaml.loadAll(txt);
+    const val = docs.length === 1 ? docs[0] : docs;
+    dom.editor.value = JSON.stringify(val, null, 2);
+    currentLang = 2; // JSON
+    if (dom.lang_btn) dom.lang_btn.textContent = LANGS[currentLang];
+    dom.editor.dispatchEvent(new Event('input'));
+    ui.toast('yaml → json');
+  } catch (e) { ui.toast('yaml parse failed: ' + e.message); }
+};
+ui.jsonToYaml = () => {
+  if (!window.jsyaml) return ui.toast('js-yaml not loaded');
+  try {
+    const val = JSON.parse((typeof getText === 'function' ? getText() : dom.editor.value));
+    dom.editor.value = window.jsyaml.dump(val, { indent: 2, lineWidth: 100, noRefs: true });
+    currentLang = 0; // YAML not in LANGS list; plain
+    if (dom.lang_btn) dom.lang_btn.textContent = LANGS[currentLang];
+    dom.editor.dispatchEvent(new Event('input'));
+    ui.toast('json → yaml');
+  } catch (e) { ui.toast('json parse failed: ' + e.message); }
 };
 
 // ------- hex viewer toggle --------------------------------------------------
@@ -765,6 +807,9 @@ ui.showPalette = function() {
     { l: 'toggle hex view',                    r: () => ui.toggleHexView() },
     { l: 'toggle CSV align view',              r: () => ui.toggleCSVView() },
     { l: 'json structure / schema view',       r: () => ui.showJsonTree() },
+    { l: 'yaml structure / schema view',       r: () => ui.showYamlTree() },
+    { l: 'convert yaml → json',                r: () => ui.yamlToJson() },
+    { l: 'convert json → yaml',                r: () => ui.jsonToYaml() },
     { l: 'toggle trim trailing whitespace on save', r: () => { prefs.trim = !prefs.trim; savePrefs(); ui.toast('trim ' + (prefs.trim ? 'on' : 'off')); } },
     // formatters
     { l: 'format json',                        r: () => actions.formatJSON() },
